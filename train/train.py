@@ -1,200 +1,28 @@
+"""Train against configurable heuristic opponents or the current network."""
 
 from __future__ import annotations
 
 import argparse
-import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
 
-from policy.environment import AmazonsEnv, Phase, run_environment_smoke_tests
+from policy.environment import AmazonsEnv, run_environment_smoke_tests
+# Re-export the original search symbols for callers of train.train.
+from policy.mcts import MCTS, MCTSConfig, SearchNode, root_visit_policy, select_from_policy
+from policy.match import MatchRunner, TrainingExample, evaluate_policies
+from policy.opponents import OpponentSchedule, TRAINING_MODES
+from policy.strategies import MCTSPolicy, NearOpponentPolicy, RandomPolicy, create_policy
 from model.model import (
     ModelTrainer,
     NetworkEvaluator,
     PolicyValueNet,
-    perspective_value,
     resolve_device,
 )
-
-
-@dataclass(frozen=True)
-class MCTSConfig:
-    simulations: int = 40
-    c_puct: float = 1.8
-    dirichlet_alpha: float = 0.3
-    dirichlet_fraction: float = 0.25
-
-
-class SearchNode:
-    """One staged decision node in the PUCT search tree."""
-
-    def __init__(self, prior: float, to_play: int, phase: Phase):
-        self.prior = float(prior)
-        self.to_play = to_play
-        self.phase = phase
-        self.visit_count = 0
-        self.value_sum = 0.0
-        self.children: Dict[int, "SearchNode"] = {}
-
-    @property
-    def mean_value(self) -> float:
-        return self.value_sum / self.visit_count if self.visit_count else 0.0
-
-    def expand(self, env: AmazonsEnv, probabilities: np.ndarray) -> None:
-        if self.children:
-            return
-        actions = env.legal_actions()
-        child_player = (
-            3 - env.current_player
-            if env.phase == Phase.SELECT_ARROW
-            else env.current_player
-        )
-        child_phase = Phase((int(env.phase) + 1) % 3)
-        for action in actions:
-            self.children[action] = SearchNode(
-                prior=float(probabilities[action]),
-                to_play=child_player,
-                phase=child_phase,
-            )
-
-
-class MCTS:
-    """Neural PUCT search with correct value handling for staged turns."""
-
-    def __init__(self, evaluator: NetworkEvaluator, config: MCTSConfig):
-        if config.simulations < 1:
-            raise ValueError("MCTS simulations must be at least one")
-        self.evaluator = evaluator
-        self.config = config
-
-    def search(
-        self,
-        env: AmazonsEnv,
-        root: Optional[SearchNode] = None,
-        exploration_noise: bool = False,
-    ) -> SearchNode:
-        if env.is_terminal():
-            raise ValueError("Cannot search a terminal state")
-        if (
-            root is None
-            or root.to_play != env.current_player
-            or root.phase != env.phase
-        ):
-            root = SearchNode(0.0, env.current_player, env.phase)
-
-        if not root.children:
-            probabilities, _ = self.evaluator.evaluate(env)
-            root.expand(env, probabilities)
-        if exploration_noise:
-            self._add_root_noise(root)
-
-        for _ in range(self.config.simulations):
-            simulation_env = env.clone()
-            node = root
-            path = [node]
-
-            while node.children:
-                action, node = self._select_child(node)
-                simulation_env.step(action)
-                path.append(node)
-                if simulation_env.is_terminal():
-                    break
-
-            leaf_player = simulation_env.current_player
-            if simulation_env.is_terminal():
-                # The current player has no complete legal play.
-                leaf_value = -1.0
-            else:
-                probabilities, leaf_value = self.evaluator.evaluate(simulation_env)
-                node.expand(simulation_env, probabilities)
-
-            for path_node in path:
-                path_node.value_sum += perspective_value(
-                    leaf_value,
-                    source_player=leaf_player,
-                    target_player=path_node.to_play,
-                )
-                path_node.visit_count += 1
-
-        return root
-
-    def _select_child(self, parent: SearchNode) -> Tuple[int, SearchNode]:
-        best_score = -float("inf")
-        best_pair: Optional[Tuple[int, SearchNode]] = None
-        parent_scale = math.sqrt(parent.visit_count + 1)
-
-        for action, child in parent.children.items():
-            q_value = perspective_value(
-                child.mean_value,
-                source_player=child.to_play,
-                target_player=parent.to_play,
-            )
-            exploration = (
-                self.config.c_puct
-                * child.prior
-                * parent_scale
-                / (1 + child.visit_count)
-            )
-            score = q_value + exploration
-            if score > best_score:
-                best_score = score
-                best_pair = (action, child)
-
-        if best_pair is None:
-            raise RuntimeError("Expanded search node has no children")
-        return best_pair
-
-    def _add_root_noise(self, root: SearchNode) -> None:
-        actions = list(root.children)
-        if not actions or self.config.dirichlet_fraction <= 0:
-            return
-        noise = np.random.dirichlet(
-            [self.config.dirichlet_alpha] * len(actions)
-        )
-        fraction = self.config.dirichlet_fraction
-        for action, random_prior in zip(actions, noise):
-            child = root.children[action]
-            child.prior = (
-                (1.0 - fraction) * child.prior
-                + fraction * float(random_prior)
-            )
-
-
-def root_visit_policy(root: SearchNode, action_size: int) -> np.ndarray:
-    policy = np.zeros(action_size, dtype=np.float32)
-    for action, child in root.children.items():
-        policy[action] = child.visit_count
-    total = float(policy.sum())
-    if total == 0:
-        actions = list(root.children)
-        policy[actions] = 1.0 / len(actions)
-    else:
-        policy /= total
-    return policy
-
-
-def select_from_policy(policy: np.ndarray, temperature: float) -> int:
-    if temperature <= 1e-8:
-        return int(np.argmax(policy))
-    adjusted = np.power(policy, 1.0 / temperature)
-    adjusted_sum = float(adjusted.sum())
-    if adjusted_sum <= 0:
-        raise RuntimeError("Policy has no positive probability")
-    adjusted /= adjusted_sum
-    return int(np.random.choice(len(policy), p=adjusted))
-
-
-@dataclass
-class TrainingExample:
-    state: np.ndarray
-    policy: np.ndarray
-    legal_mask: np.ndarray
-    player: int
-    value: float = 0.0
 
 
 class ReplayBuffer:
@@ -234,75 +62,23 @@ class ReplayBuffer:
 
 
 class SelfPlayRunner:
-    def __init__(
-        self,
-        board_size: int,
-        search: MCTS,
-        exploration_turns: int = 8,
-    ):
+    """Compatibility wrapper around the shared match runner."""
+
+    def __init__(self, board_size: int, search: MCTS, exploration_turns: int = 8):
         self.board_size = board_size
         self.search = search
         self.exploration_turns = exploration_turns
 
     def play_game(self) -> Tuple[List[TrainingExample], int]:
-        env = AmazonsEnv(self.board_size)
-        history: List[TrainingExample] = []
-        root: Optional[SearchNode] = None
-
-        while not env.is_terminal():
-            root = self.search.search(env, root, exploration_noise=True)
-            policy = root_visit_policy(root, env.action_size)
-            history.append(
-                TrainingExample(
-                    state=env.encode(),
-                    policy=policy,
-                    legal_mask=env.legal_mask(),
-                    player=env.current_player,
-                )
-            )
-
-            temperature = 1.0 if env.completed_turns < self.exploration_turns else 0.0
-            action = select_from_policy(policy, temperature)
-            next_root = root.children.get(action)
-            env.step(action)
-            # Reuse the searched child subtree at the next staged decision.
-            root = next_root
-
-        assert env.winner is not None
-        winner = env.winner
-        for example in history:
-            example.value = perspective_value(
-                1.0, source_player=winner, target_player=example.player
-            )
-        return history, winner
+        policy = MCTSPolicy(self.search)
+        return MatchRunner(self.board_size, self.exploration_turns).play_game(
+            policy, policy, collect_players=frozenset({1, 2}), training=True
+        )
 
 
-def evaluate_against_random(
-    board_size: int,
-    search: MCTS,
-    games: int,
-) -> float:
-    """Evaluate deterministically, alternating the model's color."""
-    model_wins = 0
-    for game_index in range(games):
-        env = AmazonsEnv(board_size)
-        model_player = 1 if game_index % 2 == 0 else 2
-        root: Optional[SearchNode] = None
-
-        while not env.is_terminal():
-            if env.current_player == model_player:
-                root = search.search(env, root, exploration_noise=False)
-                policy = root_visit_policy(root, env.action_size)
-                action = select_from_policy(policy, temperature=0.0)
-                next_root = root.children.get(action)
-            else:
-                action = random.choice(env.legal_actions())
-                next_root = None
-            env.step(action)
-            root = next_root
-
-        model_wins += int(env.winner == model_player)
-    return model_wins / games
+def evaluate_against_random(board_size: int, search: MCTS, games: int) -> float:
+    """Compatibility wrapper for the original random-opponent evaluation."""
+    return evaluate_policies(board_size, MCTSPolicy(search), RandomPolicy(), games)
 
 
 @dataclass(frozen=True)
@@ -315,6 +91,25 @@ class TrainingConfig:
     replay_capacity: int = 50_000
     evaluation_games: int = 4
     checkpoint: str = "checkpoints/amazons_latest.pt"
+    opponent: str = "self_play"
+    curriculum_stage_iterations: int = 5
+    near_radius: int = 1
+    near_random_fraction: float = 0.2
+    exploration_turns: int = 8
+
+    def __post_init__(self) -> None:
+        if self.board_size not in (3, 4, 5, 10):
+            raise ValueError("board_size must be 3, 4, 5 or 10")
+        for name in (
+            "iterations", "games_per_iteration", "train_batches", "batch_size",
+            "replay_capacity", "evaluation_games",
+        ):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be positive")
+        OpponentSchedule(self.opponent, self.curriculum_stage_iterations)
+        NearOpponentPolicy(self.near_radius, self.near_random_fraction)
+        if self.exploration_turns < 0:
+            raise ValueError("exploration_turns must be nonnegative")
 
 
 def run_training(
@@ -323,6 +118,8 @@ def run_training(
     trainer: ModelTrainer,
     resume: bool = False,
 ) -> None:
+    if trainer.model.board_size != training_config.board_size:
+        raise ValueError("Training board size must match the model board size")
     checkpoint_path = Path(training_config.checkpoint)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     start_iteration = 1
@@ -333,7 +130,14 @@ def run_training(
 
     evaluator = NetworkEvaluator(trainer.model, trainer.device, trainer.use_amp)
     search = MCTS(evaluator, mcts_config)
-    self_play = SelfPlayRunner(training_config.board_size, search)
+    learner = MCTSPolicy(search)
+    runner = MatchRunner(training_config.board_size, training_config.exploration_turns)
+    schedule = OpponentSchedule(
+        training_config.opponent, training_config.curriculum_stage_iterations
+    )
+    near_opponent = NearOpponentPolicy(
+        training_config.near_radius, training_config.near_random_fraction
+    )
     replay = ReplayBuffer(training_config.replay_capacity)
 
     for iteration in range(
@@ -341,8 +145,28 @@ def run_training(
     ):
         winners = {1: 0, 2: 0}
         generated_states = 0
-        for _ in range(training_config.games_per_iteration):
-            examples, winner = self_play.play_game()
+        opponent_counts: Dict[str, int] = {}
+        for game_index in range(training_config.games_per_iteration):
+            opponent_name = schedule.choose(iteration)
+            opponent_counts[opponent_name] = opponent_counts.get(opponent_name, 0) + 1
+            if opponent_name == "self_play":
+                examples, winner = runner.play_game(
+                    learner, learner, collect_players=frozenset({1, 2}), training=True
+                )
+            else:
+                opponent = create_policy(
+                    opponent_name,
+                    radius=training_config.near_radius,
+                    random_fraction=training_config.near_random_fraction,
+                )
+                # Alternate across iteration boundaries even with one game per iteration.
+                learner_player = 1 + (
+                    (iteration - 1) * training_config.games_per_iteration + game_index
+                ) % 2
+                players = (learner, opponent) if learner_player == 1 else (opponent, learner)
+                examples, winner = runner.play_game(
+                    *players, collect_players=frozenset({learner_player}), training=True
+                )
             replay.extend(examples)
             generated_states += len(examples)
             winners[winner] += 1
@@ -364,6 +188,9 @@ def run_training(
             search,
             training_config.evaluation_games,
         )
+        near_win_rate = evaluate_policies(
+            training_config.board_size, learner, near_opponent, training_config.evaluation_games
+        )
         means = {name: float(np.mean(values)) for name, values in metrics.items()}
         print(
             f"iteration={iteration:03d} generated={generated_states:5d} "
@@ -371,13 +198,16 @@ def run_training(
             f"loss={means['loss']:.4f} "
             f"policy={means['policy_loss']:.4f} "
             f"value={means['value_loss']:.4f} "
-            f"vs_random={random_win_rate:.1%}"
+            f"opponents={opponent_counts} "
+            f"vs_random={random_win_rate:.1%} vs_near={near_win_rate:.1%}"
         )
         trainer.save_checkpoint(
             checkpoint_path,
             iteration,
             extra={
                 "random_win_rate": random_win_rate,
+                "near_opponent_win_rate": near_win_rate,
+                "opponent_counts": opponent_counts,
                 "metrics": means,
                 "mcts_config": vars(mcts_config),
                 "training_config": vars(training_config),
@@ -413,6 +243,14 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--replay-capacity", type=int, default=50_000)
     parser.add_argument("--evaluation-games", type=int, default=4)
+    parser.add_argument("--opponent", choices=TRAINING_MODES, default="self_play",
+                        help="Training opponent or scheduling mode (default: self_play)")
+    parser.add_argument("--curriculum-stage-iterations", type=int, default=5,
+                        help="Iterations each for random and near_opponent, then self_play")
+    parser.add_argument("--near-radius", type=int, default=1)
+    parser.add_argument("--near-random-fraction", type=float, default=0.2,
+                        help="Uniform exploration fraction for near_opponent, from 0 to 1")
+    parser.add_argument("--exploration-turns", type=int, default=8)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--residual-blocks", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -458,6 +296,11 @@ def main() -> None:
         replay_capacity=args.replay_capacity,
         evaluation_games=args.evaluation_games,
         checkpoint=args.checkpoint,
+        opponent=args.opponent,
+        curriculum_stage_iterations=args.curriculum_stage_iterations,
+        near_radius=args.near_radius,
+        near_random_fraction=args.near_random_fraction,
+        exploration_turns=args.exploration_turns,
     )
     mcts_config = MCTSConfig(simulations=args.simulations)
     run_training(training_config, mcts_config, trainer, resume=args.resume)
