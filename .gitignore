@@ -12,3 +12,11 @@ venv/
 # System
 .DS_Store
 Thumbs.db
+
+
+# Local virtual environments and generated model weights
+.venv-*/
+checkpoints/
+
+AmZero.md
+notes.md
