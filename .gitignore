@@ -17,6 +17,8 @@ Thumbs.db
 # Local virtual environments and generated model weights
 .venv-*/
 checkpoints/
+experiments/**/model.pt
+test/
 
 AmZero.md
 notes.md

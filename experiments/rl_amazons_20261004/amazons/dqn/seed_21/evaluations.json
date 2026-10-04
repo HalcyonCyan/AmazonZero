@@ -1,0 +1,67 @@
+[
+  {
+    "steps": 0,
+    "random_return_mean": 0.38,
+    "random_return_std": 0.9296463974234632,
+    "random_win_rate": 0.69,
+    "random_first_win_rate": 0.74,
+    "random_second_win_rate": 0.64,
+    "near_opponent_return_mean": -0.08,
+    "near_opponent_return_std": 1.0018165319240662,
+    "near_opponent_win_rate": 0.46,
+    "near_opponent_first_win_rate": 0.42,
+    "near_opponent_second_win_rate": 0.5
+  },
+  {
+    "steps": 1500,
+    "random_return_mean": 0.08,
+    "random_return_std": 1.0018165319240662,
+    "random_win_rate": 0.54,
+    "random_first_win_rate": 0.56,
+    "random_second_win_rate": 0.52,
+    "near_opponent_return_mean": -0.18,
+    "near_opponent_return_std": 0.9886221408474206,
+    "near_opponent_win_rate": 0.41,
+    "near_opponent_first_win_rate": 0.52,
+    "near_opponent_second_win_rate": 0.3
+  },
+  {
+    "steps": 3000,
+    "random_return_mean": 0.34,
+    "random_return_std": 0.9451631252505215,
+    "random_win_rate": 0.67,
+    "random_first_win_rate": 0.68,
+    "random_second_win_rate": 0.66,
+    "near_opponent_return_mean": -0.16,
+    "near_opponent_return_std": 0.9920899274977164,
+    "near_opponent_win_rate": 0.42,
+    "near_opponent_first_win_rate": 0.46,
+    "near_opponent_second_win_rate": 0.38
+  },
+  {
+    "steps": 4500,
+    "random_return_mean": 0.22,
+    "random_return_std": 0.9804142600003946,
+    "random_win_rate": 0.61,
+    "random_first_win_rate": 0.52,
+    "random_second_win_rate": 0.7,
+    "near_opponent_return_mean": 0.08,
+    "near_opponent_return_std": 1.0018165319240662,
+    "near_opponent_win_rate": 0.54,
+    "near_opponent_first_win_rate": 0.34,
+    "near_opponent_second_win_rate": 0.74
+  },
+  {
+    "steps": 6000,
+    "random_return_mean": 0.46,
+    "random_return_std": 0.8923920866769474,
+    "random_win_rate": 0.73,
+    "random_first_win_rate": 0.82,
+    "random_second_win_rate": 0.64,
+    "near_opponent_return_mean": 0.02,
+    "near_opponent_return_std": 1.0048367875913826,
+    "near_opponent_win_rate": 0.51,
+    "near_opponent_first_win_rate": 0.58,
+    "near_opponent_second_win_rate": 0.44
+  }
+]

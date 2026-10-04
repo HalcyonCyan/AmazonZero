@@ -1,0 +1,2 @@
+﻿environment,algorithm,seeds,uniform_baseline_cartpole_return_mean,uniform_baseline_cartpole_return_mean_seed_std,initial_cartpole_return_mean,initial_cartpole_return_mean_seed_std,final_cartpole_return_mean,final_cartpole_return_mean_seed_std,mean_actual_steps,mean_seconds
+cartpole,actor_critic,3,22.066666666666666,3.1065790402520475,9.15,0.4821825380496472,44.03333333333334,25.965955274808078,20000.0,46.40765589999501

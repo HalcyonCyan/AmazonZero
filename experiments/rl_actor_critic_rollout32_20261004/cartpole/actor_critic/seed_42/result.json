@@ -1,0 +1,68 @@
+{
+  "config": {
+    "algorithm": "actor_critic",
+    "environment": "cartpole",
+    "seed": 42,
+    "total_steps": 20000,
+    "board_size": 3,
+    "opponent": "random",
+    "hidden_size": 64,
+    "learning_rate": 0.001,
+    "critic_learning_rate": 0.001,
+    "gamma": 0.99,
+    "rollout_steps": 32,
+    "batch_size": 64,
+    "replay_capacity": 10000,
+    "learning_starts": 256,
+    "train_frequency": 4,
+    "target_tau": 0.01,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.05,
+    "epsilon_decay_fraction": 0.6,
+    "gae_lambda": 0.95,
+    "ppo_epochs": 4,
+    "clip_ratio": 0.2,
+    "target_kl": 0.02,
+    "entropy_coefficient": 0.01,
+    "evaluation_interval": 5000,
+    "evaluation_games": 20,
+    "device": "cpu"
+  },
+  "software": {
+    "python": "3.11.9",
+    "torch": "2.14.0+cpu",
+    "numpy": "2.4.6",
+    "gymnasium": "1.3.0"
+  },
+  "actual_steps": 20000,
+  "episodes": 843,
+  "updates": 625,
+  "optimizer_steps": 625,
+  "elapsed_seconds": 45.388481199974194,
+  "uniform_baseline": {
+    "cartpole_return_mean": 22.3,
+    "cartpole_return_std": 11.272229499736813
+  },
+  "initial": {
+    "cartpole_return_mean": 8.95,
+    "cartpole_return_std": 0.6048053188292994
+  },
+  "final": {
+    "cartpole_return_mean": 21.05,
+    "cartpole_return_std": 3.734265234568276
+  },
+  "last_20_training_return": 19.5,
+  "last_update": {
+    "loss": 5.387408256530762,
+    "policy_loss": -0.18514534831047058,
+    "value_loss": 11.151585578918457,
+    "entropy": 0.323896586894989,
+    "approx_kl": -9.313225746154785e-10,
+    "clip_fraction": 0.0,
+    "gradient_norm": 1.4200446605682373,
+    "advantage_variance": 11.107024192810059,
+    "return_variance": 11.07094955444336,
+    "optimizer_steps": 1.0
+  },
+  "checkpoint": "experiments\\rl_actor_critic_rollout32_20261004\\cartpole\\actor_critic\\seed_42\\model.pt"
+}

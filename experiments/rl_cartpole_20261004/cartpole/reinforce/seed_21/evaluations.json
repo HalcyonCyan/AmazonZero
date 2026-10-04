@@ -1,0 +1,27 @@
+[
+  {
+    "steps": 0,
+    "cartpole_return_mean": 8.8,
+    "cartpole_return_std": 0.523148363780597
+  },
+  {
+    "steps": 5014,
+    "cartpole_return_mean": 74.8,
+    "cartpole_return_std": 24.846052318013694
+  },
+  {
+    "steps": 10024,
+    "cartpole_return_mean": 106.45,
+    "cartpole_return_std": 43.54002997847286
+  },
+  {
+    "steps": 15018,
+    "cartpole_return_mean": 108.7,
+    "cartpole_return_std": 51.395371489330785
+  },
+  {
+    "steps": 20074,
+    "cartpole_return_mean": 184.3,
+    "cartpole_return_std": 93.7814368344655
+  }
+]
