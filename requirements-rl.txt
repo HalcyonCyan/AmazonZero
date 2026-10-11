@@ -1,3 +1,0 @@
--r requirements.txt
-gymnasium>=1.0,<2
-matplotlib>=3.8,<4
