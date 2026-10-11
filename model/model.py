@@ -125,9 +125,11 @@ class NetworkEvaluator:
         state_tensor = torch.from_numpy(states).to(self.device)
         mask_tensor = torch.from_numpy(legal_masks).to(self.device)
         self.model.eval()
-        with torch.inference_mode(), self._autocast():
-            logits, values = self.model(state_tensor)
-            logits = logits.masked_fill(~mask_tensor, -1e9)
+        with torch.inference_mode():
+            with self._autocast():
+                logits, values = self.model(state_tensor)
+            # FP16 cannot represent -1e9; normalize masked policies in FP32.
+            logits = logits.float().masked_fill(~mask_tensor, -1e9)
             probabilities = torch.softmax(logits, dim=1)
         return (
             probabilities.float().cpu().numpy(),
@@ -156,9 +158,13 @@ class ModelTrainer:
         )
         # torch.amp is the current API; the fallback supports older PyTorch 2.x.
         try:
-            self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+            self.scaler = torch.amp.GradScaler(
+                "cuda", init_scale=1024.0, enabled=self.use_amp
+            )
         except (AttributeError, TypeError):
-            self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+            self.scaler = torch.cuda.amp.GradScaler(
+                init_scale=1024.0, enabled=self.use_amp
+            )
 
     def _autocast(self):
         if self.use_amp:
@@ -181,11 +187,12 @@ class ModelTrainer:
         self.optimizer.zero_grad(set_to_none=True)
         with self._autocast():
             logits, predicted_values = self.model(state_tensor)
-            logits = logits.masked_fill(~mask_tensor, -1e9)
-            log_policy = F.log_softmax(logits, dim=1)
-            policy_loss = -(target_policy_tensor * log_policy).sum(dim=1).mean()
-            value_loss = F.mse_loss(predicted_values, target_value_tensor)
-            total_loss = policy_loss + value_loss
+        # Keep masking and both loss terms outside autocast for stable AMP.
+        logits = logits.float().masked_fill(~mask_tensor, -1e9)
+        log_policy = F.log_softmax(logits, dim=1)
+        policy_loss = -(target_policy_tensor.float() * log_policy).sum(dim=1).mean()
+        value_loss = F.mse_loss(predicted_values.float(), target_value_tensor.float())
+        total_loss = policy_loss + value_loss
 
         self.scaler.scale(total_loss).backward()
         self.scaler.unscale_(self.optimizer)

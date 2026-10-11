@@ -1,24 +1,53 @@
-# Python
+# Keep only the runnable AlphaZero model project at the repository root
+/*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/model/
+!/policy/
+!/rule/
+!/train/
+!/tests/
+
+# Independent RL baselines and auxiliary launch scripts stay local
+/cartpole/
+/other/
+/requirements-rl.txt
+/policy/rl_policy.py
+/train/rl_*.py
+/tests/test_rl_extensions.py
+
+# Python caches and local environments
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-*/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# IDE
+# Local editor and agent settings
 .vscode/
 .idea/
+/.claude/
+/.codex/
+/.aris/
 
-# System
+# Generated weights, experiment results, and logs
+/checkpoints/
+/experiments/
+/refine-logs/
+*.log
+
+# Local analysis and working notes
+/AmZero.md
+/notes.md
+/task_plan.md
+/MANIFEST.md
+/test/
+
+# Operating system files
 .DS_Store
 Thumbs.db
-
-
-# Local virtual environments and generated model weights
-.venv-*/
-checkpoints/
-experiments/**/model.pt
-test/
-
-AmZero.md
-notes.md
