@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from rule.game_backend import Game
+from rule.game_backend import Game, SUPPORTED_BOARD_SIZES
 
 
 class Phase(IntEnum):
@@ -33,10 +33,10 @@ class AmazonsEnv:
     INPUT_CHANNELS = 8
 
     def __init__(self, board_size: int = 4):
-        if board_size not in (3, 4, 5, 10):
+        if board_size not in SUPPORTED_BOARD_SIZES:
             raise ValueError(
                 "The supplied backend defines starting positions only for "
-                "board sizes 3, 4, 5 and 10."
+                "board sizes 3, 4, 5, 6 and 10."
             )
         self.game = Game(testgame=True, board_width=board_size)
         self.board_size = board_size
@@ -180,7 +180,7 @@ class AmazonsEnv:
 
 def run_environment_smoke_tests() -> None:
     """Rule/adapter checks that do not require PyTorch."""
-    expected_opening_moves = {3: 29, 4: 104, 5: 249, 10: 2176}
+    expected_opening_moves = {3: 29, 4: 104, 5: 249, 6: 460, 10: 2176}
 
     for board_size, expected in expected_opening_moves.items():
         env = AmazonsEnv(board_size)

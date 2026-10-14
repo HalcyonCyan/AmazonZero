@@ -1,5 +1,7 @@
 import random # used for randomly selecting moves in test games.
 
+SUPPORTED_BOARD_SIZES = (3, 4, 5, 6, 10)
+
 
 class Game:
     """
@@ -156,6 +158,8 @@ class Board:
     warriors (Warrior class) and which are on fire (Flame class).
     """
     def __init__(self, width=4):
+        if width not in SUPPORTED_BOARD_SIZES:
+            raise ValueError(f"board width must be one of {SUPPORTED_BOARD_SIZES}")
         # Width of the (square) board in tiles.
         self.dim = width
 
@@ -182,6 +186,13 @@ class Board:
             self.game_tiles[69] = Warrior(2, 69)
             self.game_tiles[93] = Warrior(2, 93)
             self.game_tiles[96] = Warrior(2, 96)
+
+        # 6x6 training variant: three pieces per side, related by 180-degree rotation.
+        elif(self.dim==6):
+            for position in (0, 2, 5):
+                self.game_tiles[position] = Warrior(1, position)
+            for position in (30, 33, 35):
+                self.game_tiles[position] = Warrior(2, position)
 
         # 5x5 board.
         elif(self.dim==5):

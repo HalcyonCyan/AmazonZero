@@ -11,7 +11,7 @@ import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from policy.environment import AmazonsEnv
+from policy.environment import AmazonsEnv, SUPPORTED_BOARD_SIZES
 from policy.value import perspective_value
 
 
@@ -40,6 +40,12 @@ class PolicyValueNet(nn.Module):
         residual_blocks: int = 4,
     ):
         super().__init__()
+        if board_size not in SUPPORTED_BOARD_SIZES:
+            raise ValueError(f"board_size must be one of {SUPPORTED_BOARD_SIZES}")
+        if isinstance(channels, bool) or not isinstance(channels, int) or channels < 1:
+            raise ValueError("channels must be a positive integer")
+        if isinstance(residual_blocks, bool) or not isinstance(residual_blocks, int) or residual_blocks < 0:
+            raise ValueError("residual_blocks must be a nonnegative integer")
         self.board_size = board_size
         self.channels = channels
         self.residual_blocks = residual_blocks
@@ -222,6 +228,52 @@ class ModelTrainer:
             "extra": extra or {},
         }
         torch.save(checkpoint, Path(path))
+
+    def initialize_from_checkpoint(self, path: str | Path) -> Dict:
+        """Transfer a compatible convolutional trunk into a fresh larger/deeper model.
+
+        Keep the target heads, optimizer and scaler freshly initialized. Additional
+        residual blocks start as identities, preserving the transferred features.
+        This is initialization for a new experiment, not exact checkpoint resume.
+        """
+        if self.optimizer.state:
+            raise ValueError("Initialize the backbone before any optimizer updates")
+        checkpoint = torch.load(Path(path), map_location=self.device, weights_only=True)
+        source_config = checkpoint["model_config"]
+        source_blocks = source_config["residual_blocks"]
+        if source_config["channels"] != self.model.channels:
+            raise ValueError("Backbone initialization requires matching channel counts")
+        if source_blocks > self.model.residual_blocks:
+            raise ValueError("Target must have at least as many residual blocks as the source")
+        target_state = self.model.state_dict()
+        backbone = {
+            name: value for name, value in checkpoint["model_state"].items()
+            if name.startswith(("stem.", "trunk."))
+        }
+        expected_keys = {
+            name for name in target_state
+            if name.startswith("stem.")
+            or (name.startswith("trunk.") and int(name.split(".")[1]) < source_blocks)
+        }
+        if set(backbone) != expected_keys:
+            raise ValueError("Checkpoint backbone keys do not match the target architecture")
+        if any(value.shape != target_state[name].shape for name, value in backbone.items()):
+            raise ValueError("Checkpoint backbone shapes do not match the target architecture")
+        target_state.update(backbone)
+        self.model.load_state_dict(target_state)
+        for block in list(self.model.trunk)[source_blocks:]:
+            nn.init.zeros_(block.bn2.weight)
+            nn.init.zeros_(block.bn2.bias)
+        return {
+            "source_checkpoint": str(path),
+            "source_iteration": int(checkpoint["iteration"]),
+            "source_model_config": source_config,
+            "copied_tensors": len(backbone),
+            "copied_residual_blocks": source_blocks,
+            "identity_residual_blocks": self.model.residual_blocks - source_blocks,
+            "fresh_output_heads": True,
+            "fresh_optimizer": True,
+        }
 
     def load_checkpoint(self, path: str | Path) -> Dict:
         checkpoint = torch.load(Path(path), map_location=self.device)

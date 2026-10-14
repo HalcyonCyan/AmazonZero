@@ -42,7 +42,7 @@ class PolicyTests(unittest.TestCase):
         np.random.seed(7)
 
     def test_heuristics_remain_legal_through_full_games(self) -> None:
-        for size in (3, 4, 5, 10):
+        for size in (3, 4, 5, 6, 10):
             env = AmazonsEnv(size)
             policies = (RandomPolicy(), NearOpponentPolicy())
             steps = 0

@@ -7,11 +7,13 @@ from pathlib import Path
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
 from model.model import ModelTrainer, NetworkEvaluator, PolicyValueNet
+from model.inference import FrozenNetworkEvaluator
 from policy.environment import AmazonsEnv
 from policy import MCTSConfig, TRAINING_MODES
 from train.train import TrainingConfig, run_training
@@ -82,11 +84,56 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(checkpoint["extra"]["opponent_counts"], {"near_opponent": 2})
 
     def test_rejects_invalid_training_before_writing_checkpoint(self) -> None:
-        for kwargs in ({"evaluation_games": 0}, {"games_per_iteration": 0}, {"opponent": "invalid"}):
+        for kwargs in ({"evaluation_games": 0}, {"evaluation_interval": 0}, {"games_per_iteration": 0}, {"opponent": "invalid"}):
             with self.assertRaises(ValueError):
                 TrainingConfig(**kwargs)
         with self.assertRaisesRegex(ValueError, "board size"):
             run_training(TrainingConfig(board_size=4), MCTSConfig(simulations=2), self.make_trainer())
+
+    def test_resume_to_new_path_preserves_original_and_rejects_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pt"
+            target = Path(directory) / "target.pt"
+            trainer = self.make_trainer()
+            trainer.save_checkpoint(source, 1)
+            original = source.read_bytes()
+            config = self.config(target, "self_play", iterations=2)
+            with redirect_stdout(StringIO()):
+                run_training(config, MCTSConfig(simulations=2), trainer, resume_from=source)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(trainer.load_checkpoint(target)["iteration"], 2)
+            with redirect_stdout(StringIO()), self.assertRaisesRegex(ValueError, "TOTAL"):
+                run_training(replace(config, iterations=1), MCTSConfig(simulations=2), trainer, resume_from=source)
+
+    def test_fast_inference_refresh_and_evaluation_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fast.pt"
+            trainer = self.make_trainer()
+            config = replace(self.config(path, "self_play", iterations=2),
+                             fast_inference=True, evaluation_interval=3)
+            snapshots = []
+
+            def snapshot(*args):
+                evaluator = FrozenNetworkEvaluator(*args)
+                snapshots.append(evaluator)
+                return evaluator
+
+            with patch("train.train.FrozenNetworkEvaluator", side_effect=snapshot), \
+                    patch("train.train.evaluate_policies", return_value=0.5) as evaluation, \
+                    patch.object(trainer, "save_checkpoint", wraps=trainer.save_checkpoint) as save, \
+                    redirect_stdout(StringIO()):
+                run_training(config, MCTSConfig(simulations=2), trainer)
+            self.assertEqual(len(snapshots), 3)  # Initial and after each update.
+            self.assertFalse(torch.equal(snapshots[0].model.stem[0].weight,
+                                         snapshots[-1].model.stem[0].weight))
+            self.assertEqual(evaluation.call_count, 2)  # Final iteration, two opponents.
+            first_extra = save.call_args_list[0].kwargs["extra"]
+            self.assertIsNone(first_extra["random_win_rate"])
+            self.assertIsNone(first_extra["evaluation_iteration"])
+            last_extra = trainer.load_checkpoint(path)["extra"]
+            self.assertEqual(last_extra["evaluation_iteration"], 2)
+            self.assertEqual(last_extra["random_win_rate"], 0.5)
+            self.assertTrue(all(value >= 0 for value in last_extra["timing_seconds"].values()))
 
     def test_half_precision_outputs_keep_mask_and_losses_finite(self) -> None:
         class HalfOutputNet(PolicyValueNet):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -11,7 +12,7 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 import torch
 
-from policy.environment import AmazonsEnv, run_environment_smoke_tests
+from policy.environment import AmazonsEnv, SUPPORTED_BOARD_SIZES, run_environment_smoke_tests
 # Re-export the original search symbols for callers of train.train.
 from policy.mcts import MCTS, MCTSConfig, SearchNode, root_visit_policy, select_from_policy
 from policy.match import MatchRunner, TrainingExample, evaluate_policies
@@ -23,6 +24,7 @@ from model.model import (
     PolicyValueNet,
     resolve_device,
 )
+from model.inference import FrozenNetworkEvaluator
 
 
 class ReplayBuffer:
@@ -96,13 +98,15 @@ class TrainingConfig:
     near_radius: int = 1
     near_random_fraction: float = 0.2
     exploration_turns: int = 8
+    evaluation_interval: int = 1
+    fast_inference: bool = False
 
     def __post_init__(self) -> None:
-        if self.board_size not in (3, 4, 5, 10):
-            raise ValueError("board_size must be 3, 4, 5 or 10")
+        if self.board_size not in SUPPORTED_BOARD_SIZES:
+            raise ValueError(f"board_size must be one of {SUPPORTED_BOARD_SIZES}")
         for name in (
             "iterations", "games_per_iteration", "train_batches", "batch_size",
-            "replay_capacity", "evaluation_games",
+            "replay_capacity", "evaluation_games", "evaluation_interval",
         ):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
@@ -117,19 +121,40 @@ def run_training(
     mcts_config: MCTSConfig,
     trainer: ModelTrainer,
     resume: bool = False,
+    resume_from: str | Path | None = None,
+    initialize_from: str | Path | None = None,
 ) -> None:
     if trainer.model.board_size != training_config.board_size:
         raise ValueError("Training board size must match the model board size")
     checkpoint_path = Path(training_config.checkpoint)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     start_iteration = 1
-    if resume:
-        checkpoint = trainer.load_checkpoint(checkpoint_path)
+    initialization = None
+    if initialize_from is not None:
+        if resume or resume_from is not None:
+            raise ValueError("initialize_from cannot be combined with checkpoint resume")
+        if Path(initialize_from).resolve() == checkpoint_path.resolve():
+            raise ValueError("New initialized model must use a separate checkpoint path")
+        initialization = trainer.initialize_from_checkpoint(initialize_from)
+        print(
+            f"Initialized backbone from {initialize_from}; "
+            f"copied blocks={initialization['copied_residual_blocks']}, "
+            f"new identity blocks={initialization['identity_residual_blocks']}; "
+            "fresh output heads and optimizer, starting iteration 1"
+        )
+    if resume or resume_from is not None:
+        checkpoint = trainer.load_checkpoint(resume_from or checkpoint_path)
+        initialization = checkpoint.get("extra", {}).get("initialization")
         start_iteration = int(checkpoint["iteration"]) + 1
         print(f"Resumed checkpoint at iteration {start_iteration - 1}")
+        print("Replay buffer starts empty; generating fresh training examples")
+    if start_iteration > training_config.iterations:
+        raise ValueError(
+            f"iterations is the TOTAL target and must be at least {start_iteration} to resume"
+        )
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
-    evaluator = NetworkEvaluator(trainer.model, trainer.device, trainer.use_amp)
-    search = MCTS(evaluator, mcts_config)
+    evaluator_type = FrozenNetworkEvaluator if training_config.fast_inference else NetworkEvaluator
+    search = MCTS(evaluator_type(trainer.model, trainer.device, trainer.use_amp), mcts_config)
     learner = MCTSPolicy(search)
     runner = MatchRunner(training_config.board_size, training_config.exploration_turns)
     schedule = OpponentSchedule(
@@ -143,6 +168,7 @@ def run_training(
     for iteration in range(
         start_iteration, training_config.iterations + 1
     ):
+        iteration_started = time.perf_counter()
         winners = {1: 0, 2: 0}
         generated_states = 0
         opponent_counts: Dict[str, int] = {}
@@ -171,6 +197,8 @@ def run_training(
             generated_states += len(examples)
             winners[winner] += 1
 
+        self_play_seconds = time.perf_counter() - iteration_started
+        training_started = time.perf_counter()
         metrics: Dict[str, List[float]] = {
             "loss": [],
             "policy_loss": [],
@@ -183,13 +211,30 @@ def run_training(
             for name, value in batch_metrics.items():
                 metrics[name].append(value)
 
-        random_win_rate = evaluate_against_random(
-            training_config.board_size,
-            search,
-            training_config.evaluation_games,
+        training_seconds = time.perf_counter() - training_started
+        inference_started = time.perf_counter()
+        if training_config.fast_inference:
+            # Optimizer updates and BN statistics invalidate the frozen snapshot.
+            search.evaluator = evaluator_type(trainer.model, trainer.device, trainer.use_amp)
+            learner.reset()
+        inference_refresh_seconds = time.perf_counter() - inference_started
+        evaluation_started = time.perf_counter()
+        random_win_rate = near_win_rate = None
+        should_evaluate = (
+            iteration % training_config.evaluation_interval == 0
+            or iteration == training_config.iterations
         )
-        near_win_rate = evaluate_policies(
-            training_config.board_size, learner, near_opponent, training_config.evaluation_games
+        if should_evaluate:
+            random_win_rate = evaluate_against_random(
+                training_config.board_size, search, training_config.evaluation_games,
+            )
+            near_win_rate = evaluate_policies(
+                training_config.board_size, learner, near_opponent, training_config.evaluation_games
+            )
+        evaluation_seconds = time.perf_counter() - evaluation_started
+        evaluation_summary = (
+            f"vs_random={random_win_rate:.1%} vs_near={near_win_rate:.1%}"
+            if should_evaluate else "evaluation=skipped"
         )
         means = {name: float(np.mean(values)) for name, values in metrics.items()}
         print(
@@ -199,14 +244,24 @@ def run_training(
             f"policy={means['policy_loss']:.4f} "
             f"value={means['value_loss']:.4f} "
             f"opponents={opponent_counts} "
-            f"vs_random={random_win_rate:.1%} vs_near={near_win_rate:.1%}"
+            f"{evaluation_summary} "
+            f"seconds(self_play/train/eval)={self_play_seconds:.2f}/"
+            f"{training_seconds:.2f}/{evaluation_seconds:.2f}"
         )
         trainer.save_checkpoint(
             checkpoint_path,
             iteration,
             extra={
+                "initialization": initialization,
                 "random_win_rate": random_win_rate,
                 "near_opponent_win_rate": near_win_rate,
+                "evaluation_iteration": iteration if should_evaluate else None,
+                "timing_seconds": {
+                    "self_play": self_play_seconds,
+                    "training": training_seconds,
+                    "inference_refresh": inference_refresh_seconds,
+                    "evaluation": evaluation_seconds,
+                },
                 "opponent_counts": opponent_counts,
                 "metrics": means,
                 "mcts_config": vars(mcts_config),
@@ -235,7 +290,7 @@ def run_full_smoke_test(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--board-size", type=int, default=4, choices=[3, 4, 5, 10])
+    parser.add_argument("--board-size", type=int, default=4, choices=SUPPORTED_BOARD_SIZES)
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--games-per-iteration", type=int, default=8)
     parser.add_argument("--simulations", type=int, default=40)
@@ -243,6 +298,10 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--replay-capacity", type=int, default=50_000)
     parser.add_argument("--evaluation-games", type=int, default=4)
+    parser.add_argument("--evaluation-interval", type=int, default=1,
+                        help="Evaluate every N iterations and always at the final iteration")
+    parser.add_argument("--fast-inference", action="store_true",
+                        help="Frozen Conv/BN fusion and CUDA Graph MCTS inference; refreshed after updates")
     parser.add_argument("--opponent", choices=TRAINING_MODES, default="self_play",
                         help="Training opponent or scheduling mode (default: self_play)")
     parser.add_argument("--curriculum-stage-iterations", type=int, default=5,
@@ -256,11 +315,21 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--checkpoint", default="checkpoints/amazons_latest.pt")
-    parser.add_argument("--resume", action="store_true")
+    resume_options = parser.add_mutually_exclusive_group()
+    resume_options.add_argument("--resume", action="store_true")
+    resume_options.add_argument("--resume-from",
+                                help="Load a checkpoint while saving to a separate --checkpoint path")
+    resume_options.add_argument("--initialize-from",
+                                help="Transfer the same-width stem/trunk into a new larger or deeper model; fresh heads/optimizer")
+    parser.add_argument("--cpu-threads", type=int, default=2,
+                        help="PyTorch CPU threads; small boards usually benefit from a small count")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    if args.cpu_threads < 1:
+        parser.error("--cpu-threads must be positive")
+    torch.set_num_threads(args.cpu_threads)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -295,6 +364,8 @@ def main() -> None:
         batch_size=args.batch_size,
         replay_capacity=args.replay_capacity,
         evaluation_games=args.evaluation_games,
+        evaluation_interval=args.evaluation_interval,
+        fast_inference=args.fast_inference,
         checkpoint=args.checkpoint,
         opponent=args.opponent,
         curriculum_stage_iterations=args.curriculum_stage_iterations,
@@ -303,7 +374,10 @@ def main() -> None:
         exploration_turns=args.exploration_turns,
     )
     mcts_config = MCTSConfig(simulations=args.simulations)
-    run_training(training_config, mcts_config, trainer, resume=args.resume)
+    run_training(
+        training_config, mcts_config, trainer, resume=args.resume, resume_from=args.resume_from,
+        initialize_from=args.initialize_from,
+    )
 
 
 if __name__ == "__main__":
